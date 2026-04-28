@@ -26,7 +26,9 @@ const CALIBRATION_MAX_RADIUS: f32 = 0.25; // only learn center when stick is nea
 
 // GIP layout detection.
 // We scan for where the buttons/triggers/axes block actually starts inside the 0x20 packet payload.
-const LAYOUT_LOCK_SAMPLES: u32 = 40;
+// This must be robust because getting the offset wrong causes "everything triggers everything".
+const LAYOUT_DETECT_WINDOW: Duration = Duration::from_secs(2);
+const LAYOUT_MIN_SAMPLES: u32 = 120;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct ParsedInput {
@@ -76,70 +78,108 @@ fn parse_gip_input_packet(pkt: &[u8], payload_offset: usize) -> Result<ParsedInp
     })
 }
 
-fn score_layout_candidate(payload: &[u8], off: usize) -> Option<i32> {
-    if payload.len() < off + 14 {
-        return None;
-    }
-    let p = &payload[off..];
-
-    let buttons = le_u16(&p[0..2]);
-    let lt_raw = le_u16(&p[2..4]);
-    let rt_raw = le_u16(&p[4..6]);
-    let lx = le_i16(&p[6..8]);
-    let ly = le_i16(&p[8..10]);
-    let rx = le_i16(&p[10..12]);
-    let ry = le_i16(&p[12..14]);
-
-    // Trigger plausibility: many GIP devices store 10-bit values in 16-bit fields.
-    let lt_hi = lt_raw & !0x03FF;
-    let rt_hi = rt_raw & !0x03FF;
-
-    let mut score = 0i32;
-    if lt_hi == 0 {
-        score += 3;
-    }
-    if rt_hi == 0 {
-        score += 3;
-    }
-
-    // Buttons shouldn't usually be all-ones/all-zeros continuously.
-    if buttons != 0xFFFF {
-        score += 1;
-    }
-
-    // Axes plausibility: at rest they tend not to be extreme saturation values.
-    // We don't assume "near zero" because some devices use biased axes, but extreme values are unlikely.
-    let axes = [lx, ly, rx, ry];
-    if axes.iter().all(|&v| v != i16::MIN && v != i16::MAX) {
-        score += 2;
-    }
-
-    // Prefer offsets aligned to 2 bytes.
-    if off % 2 == 0 {
-        score += 1;
-    }
-
-    Some(score)
+#[derive(Clone, Debug)]
+struct LayoutStats {
+    samples: u32,
+    // triggers look like 10-bit values inside 16-bit words
+    trig_hi_zero: u32,
+    trig_activity: u32,
+    // axes should vary smoothly; extreme saturation is rare
+    axes_non_extreme: u32,
+    axes_activity: u32,
+    // buttons are a bitfield: only a few bits change occasionally (not constant noise)
+    buttons_change_count: u32,
+    buttons_popcount_sum: u32,
+    last_buttons: Option<u16>,
 }
 
-fn detect_payload_offset(pkt: &[u8]) -> Option<usize> {
-    if pkt.len() < 2 || pkt[0] != 0x20 {
-        return None;
-    }
-    let payload = &pkt[2..];
-    let mut best: Option<(usize, i32)> = None;
-    for off in 0..=payload.len().saturating_sub(14) {
-        let score = match score_layout_candidate(payload, off) {
-            Some(s) => s,
-            None => continue,
-        };
-        match best {
-            None => best = Some((off, score)),
-            Some((_, best_score)) if score > best_score => best = Some((off, score)),
-            _ => {}
+impl LayoutStats {
+    fn new() -> Self {
+        Self {
+            samples: 0,
+            trig_hi_zero: 0,
+            trig_activity: 0,
+            axes_non_extreme: 0,
+            axes_activity: 0,
+            buttons_change_count: 0,
+            buttons_popcount_sum: 0,
+            last_buttons: None,
         }
     }
-    best.map(|(off, _)| off)
+
+    fn observe(&mut self, payload: &[u8], off: usize) {
+        if payload.len() < off + 14 {
+            return;
+        }
+        let p = &payload[off..];
+        let buttons = le_u16(&p[0..2]);
+        let lt_raw = le_u16(&p[2..4]);
+        let rt_raw = le_u16(&p[4..6]);
+        let lx = le_i16(&p[6..8]);
+        let ly = le_i16(&p[8..10]);
+        let rx = le_i16(&p[10..12]);
+        let ry = le_i16(&p[12..14]);
+
+        self.samples += 1;
+
+        let lt_hi = lt_raw & !0x03FF;
+        let rt_hi = rt_raw & !0x03FF;
+        if lt_hi == 0 && rt_hi == 0 {
+            self.trig_hi_zero += 1;
+        }
+        // Consider triggers "active" if they aren't both at the same small value constantly.
+        if (lt_raw & 0x03FF) > 4 || (rt_raw & 0x03FF) > 4 {
+            self.trig_activity += 1;
+        }
+
+        let axes = [lx, ly, rx, ry];
+        if axes.iter().all(|&v| v != i16::MIN && v != i16::MAX) {
+            self.axes_non_extreme += 1;
+        }
+        // Activity: any axis moved noticeably (ignores tiny noise).
+        if axes.iter().any(|&v| v.abs() > 512) {
+            self.axes_activity += 1;
+        }
+
+        if let Some(prev) = self.last_buttons {
+            if prev != buttons {
+                self.buttons_change_count += 1;
+            }
+        }
+        self.last_buttons = Some(buttons);
+        self.buttons_popcount_sum += buttons.count_ones() as u32;
+    }
+
+    fn score(&self) -> i32 {
+        if self.samples == 0 {
+            return i32::MIN / 2;
+        }
+        let s = self.samples as f32;
+        let trig_hi_zero = self.trig_hi_zero as f32 / s;
+        let trig_activity = self.trig_activity as f32 / s;
+        let axes_non_extreme = self.axes_non_extreme as f32 / s;
+        let axes_activity = self.axes_activity as f32 / s;
+        let btn_changes = self.buttons_change_count as f32 / s;
+        let btn_pop_avg = self.buttons_popcount_sum as f32 / s;
+
+        // Heuristics:
+        // - triggers should almost always look 10-bit => trig_hi_zero near 1.0
+        // - axes should not be saturated and should show some movement => axes_* high
+        // - buttons should not change constantly (noise), but should change sometimes => btn_changes moderate
+        // - average popcount should be small (few pressed at a time), not ~8-16.
+        let mut score = 0.0f32;
+        score += 6.0 * trig_hi_zero;
+        score += 2.0 * trig_activity;
+        score += 3.0 * axes_non_extreme;
+        score += 3.0 * axes_activity;
+
+        // Button change rate sweet spot: ~0.0..0.15 typical; penalize high noise.
+        score += if btn_changes < 0.25 { 2.0 } else { -4.0 };
+        // Prefer small average popcount.
+        score += if btn_pop_avg < 4.0 { 2.0 } else { -3.0 };
+
+        (score * 100.0) as i32
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -468,11 +508,13 @@ fn main() -> Result<()> {
     let dump_remaining = AtomicUsize::new(RAW_DUMP_PACKETS);
     let mut buf = [0u8; 64];
     let mut payload_offset: Option<usize> = None;
-    let mut layout_votes: Vec<i32> = Vec::new();
+    let mut layout_stats: Vec<LayoutStats> = Vec::new();
+    let layout_start = Instant::now();
     let mut prev_state = DolphinState::default();
     let mut last_analog_emit = Instant::now();
     let mut cal = StickCalibration::default();
     let cal_start = Instant::now();
+    let mut emitting = false;
 
     loop {
         let n = match handle.read_interrupt(in_ep, &mut buf, Duration::from_secs(1)) {
@@ -488,28 +530,31 @@ fn main() -> Result<()> {
             continue;
         }
 
-        // Robust layout detection: gather votes for the best offset seen over multiple packets,
-        // then lock it to reduce jitter.
+        // Robust layout detection: collect stats for 2 seconds, then lock.
         if payload_offset.is_none() {
-            if let Some(off) = detect_payload_offset(pkt) {
-                let payload = &pkt[2..];
-                let s = score_layout_candidate(payload, off).unwrap_or(0);
-                if layout_votes.len() <= off {
-                    layout_votes.resize(off + 1, 0);
-                }
-                layout_votes[off] += s;
+            let payload = &pkt[2..];
+            let max_off = payload.len().saturating_sub(14);
+            if layout_stats.len() <= max_off {
+                layout_stats.resize_with(max_off + 1, LayoutStats::new);
+            }
+            for off in (0..=max_off).step_by(2) {
+                layout_stats[off].observe(payload, off);
+            }
 
-                let samples = layout_votes.iter().map(|v| v.abs() as u32).sum::<u32>();
-                if samples >= LAYOUT_LOCK_SAMPLES {
-                    if let Some((best_off, _)) = layout_votes
-                        .iter()
-                        .enumerate()
-                        .max_by_key(|&(_i, v)| *v)
-                    {
-                        payload_offset = Some(best_off);
-                        println!("Locked GIP payload offset: {best_off} bytes");
-                        let _ = io::stdout().flush();
-                    }
+            let samples = layout_stats.iter().map(|s| s.samples).max().unwrap_or(0);
+            if layout_start.elapsed() >= LAYOUT_DETECT_WINDOW && samples >= LAYOUT_MIN_SAMPLES {
+                if let Some((best_off, _best_score)) = layout_stats
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| i % 2 == 0)
+                    .map(|(i, s)| (i, s.score()))
+                    .max_by_key(|&(_i, sc)| sc)
+                {
+                    payload_offset = Some(best_off);
+                    println!("Locked GIP payload offset: {best_off} bytes");
+                    println!("(Now emitting Dolphin inputs)");
+                    let _ = io::stdout().flush();
+                    emitting = true;
                 }
             }
         }
@@ -535,6 +580,10 @@ fn main() -> Result<()> {
                         cal.rx0 += (rx - cal.rx0) / n;
                         cal.ry0 += (ry - cal.ry0) / n;
                     }
+                }
+
+                if !emitting {
+                    continue;
                 }
 
                 let now_state = parsed_to_dolphin(parsed, cal);
