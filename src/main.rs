@@ -24,6 +24,10 @@ const STICK_DEADZONE: f32 = 0.12; // radial deadzone in [-1,1] space
 const CALIBRATION_WINDOW: Duration = Duration::from_millis(750);
 const CALIBRATION_MAX_RADIUS: f32 = 0.25; // only learn center when stick is near center
 
+// GIP layout detection.
+// We scan for where the buttons/triggers/axes block actually starts inside the 0x20 packet payload.
+const LAYOUT_LOCK_SAMPLES: u32 = 40;
+
 #[derive(Clone, Copy, Debug, Default)]
 struct ParsedInput {
     buttons: u16,
@@ -72,48 +76,69 @@ fn parse_gip_input_packet(pkt: &[u8], payload_offset: usize) -> Result<ParsedInp
     })
 }
 
+fn score_layout_candidate(payload: &[u8], off: usize) -> Option<i32> {
+    if payload.len() < off + 14 {
+        return None;
+    }
+    let p = &payload[off..];
+
+    let buttons = le_u16(&p[0..2]);
+    let lt_raw = le_u16(&p[2..4]);
+    let rt_raw = le_u16(&p[4..6]);
+    let lx = le_i16(&p[6..8]);
+    let ly = le_i16(&p[8..10]);
+    let rx = le_i16(&p[10..12]);
+    let ry = le_i16(&p[12..14]);
+
+    // Trigger plausibility: many GIP devices store 10-bit values in 16-bit fields.
+    let lt_hi = lt_raw & !0x03FF;
+    let rt_hi = rt_raw & !0x03FF;
+
+    let mut score = 0i32;
+    if lt_hi == 0 {
+        score += 3;
+    }
+    if rt_hi == 0 {
+        score += 3;
+    }
+
+    // Buttons shouldn't usually be all-ones/all-zeros continuously.
+    if buttons != 0xFFFF {
+        score += 1;
+    }
+
+    // Axes plausibility: at rest they tend not to be extreme saturation values.
+    // We don't assume "near zero" because some devices use biased axes, but extreme values are unlikely.
+    let axes = [lx, ly, rx, ry];
+    if axes.iter().all(|&v| v != i16::MIN && v != i16::MAX) {
+        score += 2;
+    }
+
+    // Prefer offsets aligned to 2 bytes.
+    if off % 2 == 0 {
+        score += 1;
+    }
+
+    Some(score)
+}
+
 fn detect_payload_offset(pkt: &[u8]) -> Option<usize> {
     if pkt.len() < 2 || pkt[0] != 0x20 {
         return None;
     }
     let payload = &pkt[2..];
-    let candidates = [0usize, 2, 4, 6, 8, 10, 12, 14, 16];
     let mut best: Option<(usize, i32)> = None;
-
-    for &off in &candidates {
-        if payload.len() < off + 14 {
-            continue;
-        }
-        let p = &payload[off..];
-        let lt_raw = le_u16(&p[2..4]);
-        let rt_raw = le_u16(&p[4..6]);
-        let lt_hi = lt_raw & !0x03FF;
-        let rt_hi = rt_raw & !0x03FF;
-
-        let mut score = 0i32;
-        if lt_hi == 0 {
-            score += 2;
-        }
-        if rt_hi == 0 {
-            score += 2;
-        }
-        let buttons = le_u16(&p[0..2]);
-        if buttons != 0xFFFF {
-            score += 1;
-        }
-        let _ = le_i16(&p[6..8]);
-        let _ = le_i16(&p[8..10]);
-        let _ = le_i16(&p[10..12]);
-        let _ = le_i16(&p[12..14]);
-        score += 1;
-
+    for off in 0..=payload.len().saturating_sub(14) {
+        let score = match score_layout_candidate(payload, off) {
+            Some(s) => s,
+            None => continue,
+        };
         match best {
             None => best = Some((off, score)),
             Some((_, best_score)) if score > best_score => best = Some((off, score)),
             _ => {}
         }
     }
-
     best.map(|(off, _)| off)
 }
 
@@ -443,6 +468,7 @@ fn main() -> Result<()> {
     let dump_remaining = AtomicUsize::new(RAW_DUMP_PACKETS);
     let mut buf = [0u8; 64];
     let mut payload_offset: Option<usize> = None;
+    let mut layout_votes: Vec<i32> = Vec::new();
     let mut prev_state = DolphinState::default();
     let mut last_analog_emit = Instant::now();
     let mut cal = StickCalibration::default();
@@ -462,10 +488,29 @@ fn main() -> Result<()> {
             continue;
         }
 
+        // Robust layout detection: gather votes for the best offset seen over multiple packets,
+        // then lock it to reduce jitter.
         if payload_offset.is_none() {
-            payload_offset = detect_payload_offset(pkt);
-            if let Some(off) = payload_offset {
-                println!("Auto-detected GIP payload offset: {off} bytes");
+            if let Some(off) = detect_payload_offset(pkt) {
+                let payload = &pkt[2..];
+                let s = score_layout_candidate(payload, off).unwrap_or(0);
+                if layout_votes.len() <= off {
+                    layout_votes.resize(off + 1, 0);
+                }
+                layout_votes[off] += s;
+
+                let samples = layout_votes.iter().map(|v| v.abs() as u32).sum::<u32>();
+                if samples >= LAYOUT_LOCK_SAMPLES {
+                    if let Some((best_off, _)) = layout_votes
+                        .iter()
+                        .enumerate()
+                        .max_by_key(|&(_i, v)| *v)
+                    {
+                        payload_offset = Some(best_off);
+                        println!("Locked GIP payload offset: {best_off} bytes");
+                        let _ = io::stdout().flush();
+                    }
+                }
             }
         }
 
