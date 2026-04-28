@@ -1,21 +1,26 @@
-# PowerA Xbox Controller → Dolphin (macOS)
+# PowerA Xbox Controller Fix for Dolphin (macOS)
 
-If you plugged in a wired Xbox-style controller on macOS and **Dolphin doesn’t see it**, you’re not alone.
-Some controllers show up on USB but don’t have a macOS driver that understands their data.
+If you plugged in a wired PowerA “Xbox” controller on macOS and **Dolphin doesn’t see it**, this is for you.
+Some PowerA controllers show up on USB but macOS doesn’t provide a driver that understands their input format, so apps never get button/joystick events.
 
-This project is a small background program (“daemon”) that:
+This project is a small background program (“daemon”) that runs while Dolphin is open and:
 
-- Reads a specific PowerA wired controller over USB
-- Translates its inputs (sticks/buttons/triggers)
-- Sends them to **Dolphin Emulator** using Dolphin’s built-in **Pipe** controller backend
+- Reads the controller directly over USB
+- Translates sticks/buttons/triggers into a simple text protocol
+- Sends that input to **Dolphin Emulator** using Dolphin’s built-in **Pipe** controller backend
 
-No kernel extensions. No SIP changes. No entitlements. No virtual HID.
+No kernel extensions. No SIP changes. No special macOS permissions beyond `sudo` to access the USB device.
 
-### Supported controller
+## Will it work with my controller?
+
+Right now, it is **confirmed for one specific model** (hard-coded Vendor ID / Product ID):
 
 - **PowerA Xbox Series X Advantage Hall Effect Wired Controller**
-  - Vendor ID: `0x20D6`
-  - Product ID: `0x2079`
+  - **VID**: `0x20D6`
+  - **PID**: `0x2079`
+
+It **may also work** for other *wired* PowerA Xbox-style controllers that use Microsoft’s **GIP** (Game Input Protocol), but that’s not guaranteed.
+If your controller has a different VID/PID or uses a slightly different packet layout, we can add support (usually a small change: accept additional VID/PIDs and/or adjust parsing offsets).
 
 ## Status
 
@@ -28,7 +33,7 @@ No kernel extensions. No SIP changes. No entitlements. No virtual HID.
 
 1. **Run the daemon**
 
-On macOS, claiming a **vendor-specific USB interface** commonly requires root privileges, so we run it with `sudo`:
+On macOS, accessing a vendor-specific USB controller usually requires root privileges, so we run it with `sudo`:
 
 ```bash
 make run
