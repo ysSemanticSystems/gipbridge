@@ -1,15 +1,15 @@
 # PowerA Xbox Controller Fix for Dolphin (macOS)
 
-If you plugged in a wired PowerA “Xbox” controller on macOS and **Dolphin doesn’t see it**, this is for you.
-Some PowerA controllers show up on USB but macOS doesn’t provide a driver that understands their input format, so apps never get button/joystick events.
+If you plugged in a wired PowerA Xbox-style controller into macOS and **Dolphin doesn’t see any inputs**, this is for you.
+Some PowerA controllers show up on USB, but macOS does not interpret their controller data, so apps never receive button or stick events.
 
-This project is a small background program (“daemon”) that runs while Dolphin is open and:
+This project is a small background program that runs while Dolphin is open and:
 
 - Reads the controller directly over USB
-- Translates sticks/buttons/triggers into a simple text protocol
+- Translates sticks/buttons/triggers into Dolphin's Pipe input protocol
 - Sends that input to **Dolphin Emulator** using Dolphin’s built-in **Pipe** controller backend
 
-No kernel extensions. No SIP changes. No special macOS permissions beyond `sudo` to access the USB device.
+No kernel extensions. No SIP changes. You typically run it with `sudo` so it can access the USB device.
 
 ## Will it work with my controller?
 
@@ -19,21 +19,21 @@ Right now, it is **confirmed for one specific model** (hard-coded Vendor ID / Pr
   - **VID**: `0x20D6`
   - **PID**: `0x2079`
 
-It **may also work** for other *wired* PowerA Xbox-style controllers that use Microsoft’s **GIP** (Game Input Protocol), but that’s not guaranteed.
-If your controller has a different VID/PID or uses a slightly different packet layout, we can add support (usually a small change: accept additional VID/PIDs and/or adjust parsing offsets).
+It **might** work for other *wired* PowerA Xbox-style controllers that use Microsoft's GIP (Game Input Protocol), but that is not guaranteed.
+If your controller has a different VID/PID, support usually means: add the VID/PID and confirm the packet layout.
 
 ## Status
 
 - **USB open + claim + init packet**: implemented
-- **Input parsing**: implements the common GIP `0x20` input packet layout described in the prompt
+- **Input parsing**: implements a common GIP `0x20` input packet layout
 - **Dolphin Pipe output**: implemented (PRESS/RELEASE + SET MAIN/C/L/R)
-- **Auto payload offset detection**: implemented (handles extra bytes on some PowerA devices)
+- **Auto payload offset detection**: implemented
 
 ## Quick start
 
-1. **Run the daemon**
+1. **Run the program**
 
-On macOS, accessing a vendor-specific USB controller usually requires root privileges, so we run it with `sudo`:
+On macOS, accessing a vendor-specific USB controller usually requires root privileges:
 
 ```bash
 make run
@@ -41,7 +41,7 @@ make run
 
 2. **Tell Dolphin to use the Pipe backend**
 
-The daemon writes to this pipe (it will create the directory and FIFO automatically if missing):
+The program writes to this pipe (it will create the directory and FIFO automatically if missing):
 
 - `~/Library/Application Support/Dolphin/Pipes/powera`
 
@@ -51,7 +51,7 @@ In Dolphin:
 
 3. **Map controls inside Dolphin**
 
-In Dolphin’s controller mapping UI, bind buttons/axes as you prefer. This daemon emits:
+In Dolphin’s controller mapping UI, bind buttons/axes as you prefer. This program emits:
 
 - Buttons: `A B X Y Z START D_UP D_DOWN D_LEFT D_RIGHT`
 - Sticks: `SET MAIN x y` (left stick), `SET C x y` (right stick)
