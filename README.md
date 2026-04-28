@@ -15,11 +15,11 @@ The historical macOS solutions are all dead ends:
   - Bluetooth pairing only works for Xbox controllers with native Bluetooth — most third-party "wired" controllers have none.
   - Steam's Xbox Extended Feature Support driver does not claim third-party PowerA/PDP/HORI VID:PIDs reliably.
 
-`gipbridge` sidesteps the entire macOS input stack. It opens the controller as a regular USB device using libusb, parses the GIP input report, and writes the resulting button/axis state into a Unix named pipe. Dolphin Emulator has had built-in named-pipe controller input since 2015, so it just reads the pipe directly. macOS is never asked to provide a driver, so no entitlement is needed.
+`gipbridge` sidesteps the entire macOS input stack. It opens the controller as a regular USB device using [libusb](https://libusb.info/), parses the GIP input report, and writes the resulting button/axis state into a Unix named pipe. Dolphin Emulator has had built-in named-pipe controller input since 2015, so it just reads the pipe directly. macOS is never asked to provide a driver, so no entitlement is needed.
 
 ## Supported controllers
 
-This bridge works for any wired controller that speaks Microsoft's standard GIP `0x20` input report. The known-good list is seeded from the Linux kernel `xpad` driver source and includes most PowerA, PDP, HORI, and Microsoft wired Xbox One / Series X|S controllers. Run `gipbridge --list` to see the full list.
+This bridge works for any wired controller that speaks Microsoft's standard GIP `0x20` input report. The known-good list is seeded from the Linux kernel [`xpad` driver](https://github.com/torvalds/linux/blob/master/drivers/input/joystick/xpad.c) and includes most PowerA, PDP, HORI, and Microsoft wired Xbox One / Series X|S controllers. Run `gipbridge --list` to see the full list.
 
 If your controller isn't in the list, you can still try it with `--vid` and `--pid`. The auto-payload-offset detector handles minor packet-layout differences between vendors. If it works, please open a pull request adding the VID/PID + controller name to the list.
 
@@ -41,7 +41,7 @@ That's the whole architecture. Roughly 600 lines of Rust.
 
   - macOS (Apple Silicon or Intel). Tested on Apple Silicon.
   - Rust toolchain (`rustup` recommended).
-  - Dolphin Emulator (any build with Pipe input support — i.e. since 2015).
+  - [Dolphin Emulator](https://dolphin-emu.org/) (any build with Pipe input support — i.e. since 2015).
   - `sudo` to claim the vendor-class USB interface.
 
 ## Quick start
@@ -110,9 +110,9 @@ For a system-wide solution that exposes the controller to all macOS applications
 
 Protocol references:
 
-  - Linux kernel `xpad` driver (drivers/input/joystick/xpad.c) — canonical VID/PID list and GIP input report layout.
-  - `medusalix/xone` — userspace-friendly GIP protocol documentation.
-  - Dolphin Emulator's named-pipe controller backend (Source/Core/InputCommon/ControllerInterface/Pipes/) — the escape hatch that makes the whole approach possible without a virtual HID device or DriverKit entitlement.
+  - Linux kernel [`xpad` driver](https://github.com/torvalds/linux/blob/master/drivers/input/joystick/xpad.c) — canonical VID/PID list and GIP input report layout.
+  - [`medusalix/xone`](https://github.com/medusalix/xone) — userspace-friendly GIP protocol documentation.
+  - Dolphin Emulator's named-pipe controller backend ([`Pipes.h`](https://github.com/dolphin-emu/dolphin/blob/master/Source/Core/InputCommon/ControllerInterface/Pipes/Pipes.h)) — the escape hatch that makes the whole approach possible without a virtual HID device or DriverKit entitlement.
 
 ## License
 
