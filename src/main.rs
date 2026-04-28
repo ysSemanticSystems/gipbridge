@@ -262,18 +262,22 @@ fn apply_radial_deadzone(x: f32, y: f32, dz: f32) -> (f32, f32) {
 fn parsed_to_dolphin(p: ParsedInput, cal: StickCalibration) -> DolphinState {
     let b = p.buttons;
 
-    let d_up = (b & 0x0001) != 0;
-    let d_down = (b & 0x0002) != 0;
-    let d_left = (b & 0x0004) != 0;
-    let d_right = (b & 0x0008) != 0;
-
-    let start = (b & 0x0010) != 0;
-    let view = (b & 0x0020) != 0;
-
-    let a = (b & 0x1000) != 0;
-    let bb = (b & 0x2000) != 0;
-    let x = (b & 0x4000) != 0;
-    let y = (b & 0x8000) != 0;
+    // GIP 0x20 button word layout (per Linux xpad / medusalix xone reference drivers):
+    //   bit 2 Menu, bit 3 View, bits 4..7 A/B/X/Y, bits 8..11 d-pad U/D/L/R,
+    //   bits 12..13 LB/RB, bits 14..15 LS/RS.
+    let start = (b & 0x0004) != 0; // Menu  -> GameCube Start
+    let view = (b & 0x0008) != 0; // View  -> GameCube Z
+    let a = (b & 0x0010) != 0;
+    let bb = (b & 0x0020) != 0;
+    let x = (b & 0x0040) != 0;
+    let y = (b & 0x0080) != 0;
+    let d_up = (b & 0x0100) != 0;
+    let d_down = (b & 0x0200) != 0;
+    let d_left = (b & 0x0400) != 0;
+    let d_right = (b & 0x0800) != 0;
+    // Bumpers and stick clicks are intentionally not emitted to Dolphin's pipe protocol.
+    // The pipe has no L_DIGITAL/R_DIGITAL distinct from analog L/R, and SET L/R is already
+    // driven by the analog triggers below. Leave LB/RB/LS/RS unbound at the daemon level.
 
     let z = view;
 
